@@ -1,0 +1,132 @@
+package frogslack
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io/ioutil"
+	"net/http"
+	"os"
+
+	"github.com/golang/glog"
+	"github.com/nlopes/slack"
+)
+
+const (
+	RESPONSE_TYPE_IN_CHANNEL = "in_channel"
+	RESPONSE_TYPE_EPHEMERAL  = "ephemeral"
+)
+
+var (
+	apiUrl        = "https://frog.tips/api/1/tips"
+	signingSecret = os.Getenv("SLACK_SIGNING_SECRET_SHH")
+)
+
+type Attachment struct {
+	Text string `json:"text"`
+}
+
+type Response struct {
+	ResponseType string       `json:"response_type"`
+	Text         string       `json:"text"`
+	Attachments  []Attachment `json:"attachments,omitempty"`
+}
+
+type Request struct {
+}
+
+type TipsResponse struct {
+	Tips []Tip `json:"tips"`
+}
+
+type Tip struct {
+	Tip    string `json:"tip"`
+	Number int    `json:"number"`
+}
+
+func getTip(ctx context.Context) (Tip, error) {
+	var tr TipsResponse
+	var tip Tip
+	req, err := http.NewRequest(http.MethodGet, apiUrl, nil)
+	if err != nil {
+		return tip, err
+	}
+	req.WithContext(ctx)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return tip, err
+	}
+	d := json.NewDecoder(resp.Body)
+	if err := d.Decode(&tr); err != nil {
+		return tip, err
+	}
+	if len(tr.Tips) == 0 {
+		return tip, errors.New("NOT ENOUGH TIPS")
+	}
+	return tr.Tips[0], err
+}
+
+func Croak(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		glog.Errorf("I will not do this anymore %q", err)
+		writeError(w, "SORRY, NO TIPS RIGHT NOW.")
+		return
+	}
+
+	if err = verify(r.Header, body); err != nil {
+		writeError(w, "SORRY, NO TIPS RIGHT NOW.")
+		return
+	}
+
+	tip, err := getTip(ctx)
+	if err != nil {
+		glog.Errorf("getTip(%v) = _, %q", ctx, err)
+		writeResponse(w, &Response{
+			ResponseType: RESPONSE_TYPE_EPHEMERAL,
+			Text:         "SORRY, NO TIPS RIGHT NOW. COME BACK.",
+		})
+		return
+	}
+
+	writeResponse(w, &Response{
+		ResponseType: RESPONSE_TYPE_IN_CHANNEL,
+		Text:         tip.Tip,
+	})
+}
+
+func verify(h http.Header, body []byte) error {
+	sv, err := slack.NewSecretsVerifier(h, signingSecret)
+	if err != nil {
+		glog.Errorf("Ohmy, no secrets? %q", err)
+		return err
+	}
+	_, err = sv.Write(body)
+	if err != nil {
+		glog.Errorf("forget it %q", err)
+		return err
+	}
+	if err = sv.Ensure(); err != nil {
+		glog.Errorf("I can't do this anymore %q", err)
+		return err
+	}
+	return nil
+}
+
+func writeError(w http.ResponseWriter, message string) {
+	writeResponse(w, &Response{
+		ResponseType: RESPONSE_TYPE_EPHEMERAL,
+		Text:         message,
+	})
+}
+
+func writeResponse(w http.ResponseWriter, resp *Response) {
+	w.Header().Set("Content-Type", "application/json")
+	e := json.NewEncoder(w)
+	if err := e.Encode(resp); err != nil {
+		glog.Errorf("e.Encode(%#v) = _, %q", resp, err)
+	}
+}
