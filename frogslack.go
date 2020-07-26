@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"os"
 
 	"github.com/golang/glog"
@@ -20,6 +21,8 @@ const (
 var (
 	apiUrl        = "https://frog.tips/api/1/tips"
 	signingSecret = os.Getenv("SLACK_SIGNING_SECRET_SHH")
+	clientId      = os.Getenv("SLACK_CLIENT_ID")
+	clientSecret  = os.Getenv("SLACK_CLIENT_SECRET")
 )
 
 type Attachment struct {
@@ -129,4 +132,45 @@ func writeResponse(w http.ResponseWriter, resp *Response) {
 	if err := e.Encode(resp); err != nil {
 		glog.Errorf("e.Encode(%#v) = _, %q", resp, err)
 	}
+}
+
+type accessResp struct {
+	Ok    bool   `json:"ok"`
+	AppId string `json:"app_id"`
+	Error string `json:"error"`
+	Team  struct {
+		Id string `json:"id"`
+	} `json:"team"`
+}
+
+func Hop(w http.ResponseWriter, r *http.Request) {
+	code := r.FormValue("code")
+	resp, err := http.PostForm("https://slack.com/api/oauth.v2.access", url.Values{
+		"code":          []string{code},
+		"client_id":     []string{clientId},
+		"client_secret": []string{clientSecret},
+		"redirect_uri": []string{""},
+	})
+	if err != nil {
+		glog.Errorf("what hath god wrought: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	glog.Infof("hop'd: %v", resp.StatusCode)
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		glog.Errorf("nobody %v", err)
+		return
+	}
+	var ar accessResp
+	if err := json.Unmarshal(body, &ar); err != nil {
+		glog.Errorf("its not even jason: %v", err)
+		return
+	}
+	glog.Infof("ok: %q, appId: %q, error: %q, Team: %+v", ar.Ok, ar.AppId, ar.Error, ar.Team)
+	if !ar.Ok {
+		w.Write([]byte("dang"))
+		return
+	}
+	w.Write([]byte("it's fine."))
 }
